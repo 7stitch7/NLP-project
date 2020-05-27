@@ -38,6 +38,61 @@ train_data, target_y_train = read_data("train.csv")
 validation_data, target_y_validation = read_data("val.csv")
 test_data = read_test_data('test.csv')
 
+def tf_idf(data):
+    import numpy as np
+    DF = {}
+
+    for tokensized_doc in data:
+        # get each unique word in the doc - we need to know whether the word is appeared in the document
+        for term in np.unique(tokensized_doc):
+            try:
+                DF[term] += 1
+            except:
+                DF[term] = 1
+
+    from nltk.corpus import stopwords
+    from nltk.tokenize import word_tokenize
+    from collections import Counter
+    import math
+
+    tf_idf = {}
+
+    # total number of documents
+    N = len(data)
+
+    doc_id = 0
+    # get each tokenised doc
+    for tokensized_doc in data:
+        # initialise counter for the doc
+        counter = Counter(tokensized_doc)
+        # calculate total number of words in the doc
+        total_num_words = len(tokensized_doc)
+
+        # get each unique word in the doc
+        for term in np.unique(tokensized_doc):
+            # calculate Term Frequency
+            tf = counter[term] / total_num_words
+
+            # calculate Document Frequency
+            df = DF[term]
+
+            # calculate Inverse Document Frequency
+            idf = math.log(N / (df + 1)) + 1
+
+            # calculate TF-IDF
+            tf_idf[doc_id, term] = tf * idf
+
+        doc_id += 1
+
+    TF_doc=[]
+    for i in range(N):
+        temp=[]
+        for word in data[i]:
+            temp.append(tf_idf[(i,word)])
+        TF_doc.append(temp)
+
+    return TF_doc
+
 word_to_ix = {}
 for sentence in train_data+validation_data+test_data:
     for word in sentence:
@@ -95,6 +150,10 @@ val_pos_index =  to_index(val_pos,pos_to_ix)
 val_output_index = to_index(target_y_validation,tag_to_ix)
 test_input_index = to_index(test_data,word_to_ix)
 test_pos_index =  to_index(test_pos,pos_to_ix)
+
+train_tf_idf_index = tf_idf(train_data)
+val_tf_idf_index = tf_idf(validation_data)
+test_tf_idf_index = tf_idf(test_data)
 #test_output_index = to_index(target_y_test,tag_to_ix)
 
 import torch
@@ -159,7 +218,7 @@ class BiLSTM_CRF(nn.Module):
         """Here we use the embedding matrix as the initial weights of nn.Embedding"""
         self.word_embeds.weight.data.copy_(torch.from_numpy(embedding_matrix))
 
-        self.lstm = nn.LSTM(embedding_dim + len(pos_to_ix), hidden_dim // 2,
+        self.lstm = nn.LSTM(embedding_dim + len(pos_to_ix) + 1, hidden_dim // 2,
                             num_layers=1, bidirectional=True)
 
         # Maps the output of the LSTM into tag space.
@@ -212,14 +271,15 @@ class BiLSTM_CRF(nn.Module):
         alpha = log_sum_exp(terminal_var)
         return alpha
 
-    def _get_lstm_features(self, sentence, pos_tagging):
+    def _get_lstm_features(self, sentence, pos_tagging,tf_idf):
         self.hidden = self.init_hidden()
         embeds = self.word_embeds(sentence).view(len(sentence), -1)
         pos = torch.eye(self.posset_size).to(device)[pos_tagging]
-        combined = torch.cat((embeds, pos), 1).view(len(sentence), 1, -1)
+        tf_idf = torch.tensor(np.array(tf_idf),dtype=torch.float).unsqueeze(1)
+        combined = torch.cat((embeds, pos,tf_idf), 1).view(len(sentence), 1, -1)
         lstm_out, self.hidden = self.lstm(combined, self.hidden)
         lstm_out = lstm_out.view(len(sentence), self.hidden_dim)
-        #lstm_feats = self.hidden2tag(lstm_out)
+
         return lstm_out
 
     def _cal_attention(self, lstm_out, method):
@@ -289,17 +349,17 @@ class BiLSTM_CRF(nn.Module):
         best_path.reverse()
         return path_score, best_path
 
-    def neg_log_likelihood(self, sentence, pos_tagging, tags):
-        lstm_out = self._get_lstm_features(sentence, pos_tagging)
+    def neg_log_likelihood(self, sentence, pos_tagging,tf_idf, tags):
+        lstm_out = self._get_lstm_features(sentence, pos_tagging,tf_idf)
         method = 'ATTN_TYPE_DOT_PRODUCT'
         attention_feats = self._cal_attention(lstm_out, method)
         forward_score = self._forward_alg(attention_feats)
         gold_score = self._score_sentence(attention_feats, tags)
         return forward_score - gold_score
 
-    def forward(self, sentence, pos_tagging):  # dont confuse this with _forward_alg above.
+    def forward(self, sentence, pos_tagging,tf_idf):  # dont confuse this with _forward_alg above.
         # Get the emission scores from the BiLSTM
-        lstm_out = self._get_lstm_features(sentence, pos_tagging)
+        lstm_out = self._get_lstm_features(sentence, pos_tagging,tf_idf)
 
         method = 'ATTN_TYPE_DOT_PRODUCT'
         attention_feats = self._cal_attention(lstm_out, method)
@@ -313,16 +373,18 @@ class BiLSTM_CRF(nn.Module):
 
 import numpy as np
 from sklearn.metrics import accuracy_score
-def cal_acc(model, input_index,pos_index, output_index):
+def cal_acc(model, input_index,pos_index,tf_idf_index, output_index):
     ground_truth = []
     predicted = []
     for i in range(len(input_index)):
         input_sent = input_index[i]
         output_tag = output_index[i]
         pos_tag = pos_index[i]
+        tf_idf = tf_idf_index[i]
         input_sent = torch.tensor(input_sent, dtype=torch.long).to(device)
         pos_tag = torch.tensor(pos_tag, dtype=torch.long).to(device)
-        _,prediction,_ = model(input_sent,pos_tag)
+        tf_idf = torch.tensor(tf_idf,dtype=torch.long).to(device)
+        _,prediction,_ = model(input_sent,pos_tag,tf_idf)
         predicted = predicted + prediction
         ground_truth = ground_truth + output_tag
     accuracy = float((np.array(predicted)==np.array(ground_truth)).astype(int).sum())/float(len(ground_truth))
@@ -349,6 +411,7 @@ for epoch in range(20):
     for i, idxs in enumerate(train_input_index):
         tags_index = train_output_index[i]
         pos_index = train_pos_index[i]
+        tf_idf_index = train_tf_idf_index[i]
 
         # Step 1. Remember that Pytorch accumulates gradients.
         # We need to clear them out before each instance
@@ -358,10 +421,11 @@ for epoch in range(20):
         # turn them into Tensors of word indices.
         sentence_in = torch.tensor(idxs, dtype=torch.long).to(device)
         pos_in = torch.tensor(pos_index, dtype=torch.long).to(device)
+        tf_idf_in = torch.tensor(tf_idf_index,dtype=torch.float).to(device)
         targets = torch.tensor(tags_index, dtype=torch.long).to(device)
 
         # Step 3. Run our forward pass.
-        loss = model.neg_log_likelihood(sentence_in,pos_in, targets)
+        loss = model.neg_log_likelihood(sentence_in,pos_in,tf_idf_in , targets)
 
 
         # Step 4. Compute the loss, gradients, and update the parameters by
@@ -372,8 +436,8 @@ for epoch in range(20):
         train_loss+=loss.item()
 
     model.eval()
-    _, _, train_acc = cal_acc(model,train_input_index,train_pos_index,train_output_index)
-    _, _, val_acc = cal_acc(model,val_input_index,val_pos_index,val_output_index)
+    _, _, train_acc = cal_acc(model,train_input_index,train_pos_index,train_tf_idf_index,train_output_index)
+    _, _, val_acc = cal_acc(model,val_input_index,val_pos_index,val_tf_idf_index,val_output_index)
 
     val_loss = 0
     for i, idxs in enumerate(val_input_index):
@@ -381,8 +445,10 @@ for epoch in range(20):
         sentence_in = torch.tensor(idxs, dtype=torch.long).to(device)
         pos_index = val_pos_index[i]
         pos_in = torch.tensor(pos_index, dtype=torch.long).to(device)
+        tf_idf_index = val_tf_idf_index[i]
+        tf_idf_in = torch.tensor(tf_idf_index,dtype=torch.float).to(device)
         targets = torch.tensor(tags_index, dtype=torch.long).to(device)
-        loss = model.neg_log_likelihood(sentence_in,pos_in, targets)
+        loss = model.neg_log_likelihood(sentence_in,pos_in,tf_idf_in, targets)
         val_loss+=loss.item()
     time2 = datetime.datetime.now()
 
