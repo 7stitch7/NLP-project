@@ -203,8 +203,10 @@ def log_sum_exp(vec):
 
 class BiLSTM_CRF(nn.Module):
 
-    def __init__(self, vocab_size, tag_to_ix, pos_to_ix, embedding_dim, hidden_dim):
+    def __init__(self, vocab_size, tag_to_ix, pos_to_ix, embedding_dim, hidden_dim,num_layers=2,method='ATTN_TYPE_DOT_PRODUCT'):
         super(BiLSTM_CRF, self).__init__()
+        self.method = method
+        self.num_layers = num_layers
         self.embedding_dim = embedding_dim
         self.hidden_dim = hidden_dim
         self.vocab_size = vocab_size
@@ -219,7 +221,7 @@ class BiLSTM_CRF(nn.Module):
         self.word_embeds.weight.data.copy_(torch.from_numpy(embedding_matrix))
 
         self.lstm = nn.LSTM(embedding_dim + len(pos_to_ix) + 1, hidden_dim // 2,
-                            num_layers=1, bidirectional=True)
+                            num_layers=self.num_layers, bidirectional=True)
 
         # Maps the output of the LSTM into tag space.
         self.hidden2tag = nn.Linear(hidden_dim*2, self.tagset_size)
@@ -237,8 +239,8 @@ class BiLSTM_CRF(nn.Module):
         self.hidden = self.init_hidden()
 
     def init_hidden(self):
-        return (torch.randn(2, 1, self.hidden_dim // 2).to(device),
-                torch.randn(2, 1, self.hidden_dim // 2).to(device))
+        return (torch.randn(2*self.num_layers, 1, self.hidden_dim // 2).to(device),
+                torch.randn(2*self.num_layers, 1, self.hidden_dim // 2).to(device))
 
     def _forward_alg(self, feats):
         # Do the forward algorithm to compute the partition function
@@ -289,6 +291,13 @@ class BiLSTM_CRF(nn.Module):
             for i in range(lstm_out.size()[0]):
                 hidden = lstm_out[i]
                 attn_weights = F.softmax(torch.bmm(hidden.unsqueeze(0).unsqueeze(0), lstm_out.T.unsqueeze(0)), dim=-1)
+                attn_output = torch.bmm(attn_weights, lstm_out.unsqueeze(0))
+                concat_output = torch.cat((hidden.unsqueeze(0),attn_output[0]), 1)
+                attention_result[i] = concat_output.squeeze(0)
+        elif method == 'ATTN_TYPE_SCALE_DOT_PRODUCT':
+            for i in range(lstm_out.size()[0]):
+                hidden = lstm_out[i]
+                attn_weights = F.softmax(1/np.sqrt(self.hidden_dim)*torch.bmm(hidden.unsqueeze(0).unsqueeze(0), lstm_out.T.unsqueeze(0)), dim=-1)
                 attn_output = torch.bmm(attn_weights, lstm_out.unsqueeze(0))
                 concat_output = torch.cat((hidden.unsqueeze(0),attn_output[0]), 1)
                 attention_result[i] = concat_output.squeeze(0)
@@ -351,8 +360,8 @@ class BiLSTM_CRF(nn.Module):
 
     def neg_log_likelihood(self, sentence, pos_tagging,tf_idf, tags):
         lstm_out = self._get_lstm_features(sentence, pos_tagging,tf_idf)
-        method = 'ATTN_TYPE_DOT_PRODUCT'
-        attention_feats = self._cal_attention(lstm_out, method)
+
+        attention_feats = self._cal_attention(lstm_out, self.method)
         forward_score = self._forward_alg(attention_feats)
         gold_score = self._score_sentence(attention_feats, tags)
         return forward_score - gold_score
@@ -361,8 +370,7 @@ class BiLSTM_CRF(nn.Module):
         # Get the emission scores from the BiLSTM
         lstm_out = self._get_lstm_features(sentence, pos_tagging,tf_idf)
 
-        method = 'ATTN_TYPE_DOT_PRODUCT'
-        attention_feats = self._cal_attention(lstm_out, method)
+        attention_feats = self._cal_attention(lstm_out, self.method)
 
         # Find the best path, given the features.
 
@@ -392,9 +400,11 @@ def cal_acc(model, input_index,pos_index,tf_idf_index, output_index):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 HIDDEN_DIM = 128
+HIDDEN_LAYER=3
+method = 'ATTN_TYPE_SCALE_DOT_PRODUCT'
 
 
-model = BiLSTM_CRF(len(word_to_ix), tag_to_ix, pos_to_ix ,EMBEDDING_DIM, HIDDEN_DIM).to(device)
+model = BiLSTM_CRF(len(word_to_ix), tag_to_ix, pos_to_ix ,EMBEDDING_DIM, HIDDEN_DIM,HIDDEN_LAYER,method).to(device)
 optimizer = optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-4)
 
 """Each epoch will take about 1-2 minutes"""
@@ -454,7 +464,7 @@ for epoch in range(20):
 
     print("Epoch:%d, Training loss: %.2f, train acc: %.4f, val loss: %.2f, val acc: %.4f, time: %.2fs" %(epoch+1, train_loss,train_acc, val_loss, val_acc, (time2-time1).total_seconds()))
 
-y_true,y_pred,_ = cal_acc(model,val_input_index,val_pos_index,val_output_index)
+y_true,y_pred,_ = cal_acc(model,val_input_index,val_pos_index,val_tf_idf_index,val_output_index)
 
 def decode_output(output_list):
     ix_to_tag = {v:k for k,v in tag_to_ix.items()}
