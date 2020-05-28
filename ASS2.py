@@ -400,8 +400,8 @@ def cal_acc(model, input_index,pos_index,tf_idf_index, output_index):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 HIDDEN_DIM = 128
-HIDDEN_LAYER=3
-method = 'ATTN_TYPE_SCALE_DOT_PRODUCT'
+HIDDEN_LAYER=5
+method = 'ATTN_TYPE_DOT_PRODUCT'
 
 
 model = BiLSTM_CRF(len(word_to_ix), tag_to_ix, pos_to_ix ,EMBEDDING_DIM, HIDDEN_DIM,HIDDEN_LAYER,method).to(device)
@@ -475,3 +475,24 @@ y_pred_decode = decode_output(y_pred)
 
 from sklearn.metrics import classification_report
 print(classification_report(y_true_decode,y_pred_decode,digits=4))
+
+ground_truth = []
+predicted = []
+for i in range(len(test_input_index)):
+    input_sent = test_input_index[i]
+
+    pos_tag = test_pos_index[i]
+    tf_idf = test_tf_idf_index[i]
+    input_sent = torch.tensor(input_sent, dtype=torch.long).to(device)
+    pos_tag = torch.tensor(pos_tag, dtype=torch.long).to(device)
+    tf_idf = torch.tensor(tf_idf, dtype=torch.long).to(device)
+    _, prediction, _ = model(input_sent, pos_tag, tf_idf)
+    predicted = predicted + prediction
+
+print(predicted)
+test_output = decode_output(predicted)
+
+output_file = pd.DataFrame(columns=['Id','Predicted'])
+output_file['Predicted'] = test_output[1:]
+output_file['Id'] = np.arange(0,len(test_output[1:]))
+output_file.to_csv('predicted.csv', index=False)
