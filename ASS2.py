@@ -30,6 +30,7 @@ def read_test_data(file_name):
     Sentences = ' '.join(df.Sentence.tolist()).split(' . ')
     word = ' '.join(df.Sentence.tolist()).split(' ')
     train = [sentence.strip().split() + ['.'] for sentence in Sentences]
+    train[-1] = train[-1][:-1]
     print("test data has been loaded!")
     return train
 
@@ -475,7 +476,7 @@ y_pred_decode = decode_output(y_pred)
 
 from sklearn.metrics import classification_report
 print(classification_report(y_true_decode,y_pred_decode,digits=4))
-
+test_pos_index[-1]=test_pos_index[-1][:-1]
 ground_truth = []
 predicted = []
 for i in range(len(test_input_index)):
