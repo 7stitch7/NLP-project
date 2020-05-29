@@ -401,7 +401,7 @@ def cal_acc(model, input_index,pos_index,tf_idf_index, output_index):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 HIDDEN_DIM = 128
-HIDDEN_LAYER=5
+HIDDEN_LAYER=2
 method = 'ATTN_TYPE_DOT_PRODUCT'
 
 
@@ -464,7 +464,7 @@ for epoch in range(20):
     time2 = datetime.datetime.now()
 
     print("Epoch:%d, Training loss: %.2f, train acc: %.4f, val loss: %.2f, val acc: %.4f, time: %.2fs" %(epoch+1, train_loss,train_acc, val_loss, val_acc, (time2-time1).total_seconds()))
-
+torch.save(model,"NER_pos_tfidf.pt")
 y_true,y_pred,_ = cal_acc(model,val_input_index,val_pos_index,val_tf_idf_index,val_output_index)
 
 def decode_output(output_list):
@@ -494,6 +494,6 @@ print(predicted)
 test_output = decode_output(predicted)
 
 output_file = pd.DataFrame(columns=['Id','Predicted'])
-output_file['Predicted'] = test_output[1:]
-output_file['Id'] = np.arange(0,len(test_output[1:]))
+output_file['Predicted'] = test_output
+output_file['Id'] = np.arange(0,len(test_output))
 output_file.to_csv('predicted.csv', index=False)
