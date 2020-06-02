@@ -401,7 +401,7 @@ def cal_acc(model, input_index,pos_index,tf_idf_index, output_index):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 HIDDEN_DIM = 128
-HIDDEN_LAYER=2
+HIDDEN_LAYER=3
 method = 'ATTN_TYPE_DOT_PRODUCT'
 
 
