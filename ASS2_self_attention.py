@@ -1,3 +1,5 @@
+import math
+
 import pandas as pd
 df = pd.read_csv("POS_tag_sentence.csv")
 POS = df['0'].tolist()
@@ -179,6 +181,7 @@ def log_sum_exp(vec):
     return max_score + \
            torch.log(torch.sum(torch.exp(vec - max_score_broadcast)))
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 import torch
 import torch.autograd as autograd
@@ -202,10 +205,24 @@ def log_sum_exp(vec):
            torch.log(torch.sum(torch.exp(vec - max_score_broadcast)))
 
 
+nlayers = 2 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
+nhead = 2 # the number of heads in the multiheadattention models
+dropout = 0.05 # the dropout value
 class BiLSTM_CRF(nn.Module):
 
-    def __init__(self, vocab_size, tag_to_ix, pos_to_ix, embedding_dim, hidden_dim,num_layers=2,method='ATTN_TYPE_DOT_PRODUCT'):
+    def __init__(self, vocab_size, tag_to_ix, pos_to_ix,nhead,nlayers, embedding_dim, hidden_dim,dropout,num_layers=2,method='ATTN_TYPE_DOT_PRODUCT'):
         super(BiLSTM_CRF, self).__init__()
+        from torch.nn import TransformerEncoder, TransformerEncoderLayer
+        self.model_type = 'Transformer'
+        self.src_mask = None
+        self.pos_encoder = PositionalEncoding(hidden_dim, dropout)
+        encoder_layers = TransformerEncoderLayer(hidden_dim, nhead, embedding_dim, dropout)
+        self.transformer_encoder = TransformerEncoder(encoder_layers, nlayers)
+        self.encoder = nn.Embedding(vocab_size, embedding_dim)
+        self.embedding_dim = embedding_dim
+
+        self.init_weights()
+
         self.method = method
         self.num_layers = num_layers
         self.embedding_dim = embedding_dim
@@ -225,7 +242,7 @@ class BiLSTM_CRF(nn.Module):
                             num_layers=self.num_layers, bidirectional=True)
 
         # Maps the output of the LSTM into tag space.
-        self.hidden2tag = nn.Linear(hidden_dim*2, self.tagset_size)
+        self.hidden2tag = nn.Linear(hidden_dim, self.tagset_size)
 
         # Matrix of transition parameters.  Entry i,j is the score of
         # transitioning *to* i *from* j.
@@ -242,6 +259,16 @@ class BiLSTM_CRF(nn.Module):
     def init_hidden(self):
         return (torch.randn(2*self.num_layers, 1, self.hidden_dim // 2).to(device),
                 torch.randn(2*self.num_layers, 1, self.hidden_dim // 2).to(device))
+    def _generate_square_subsequent_mask(self, sz):
+        #triu returns the upper triangular part of a matrix (2-D tensor) or batch of matrices (see section below)
+        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+        mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
+        return mask
+
+    def init_weights(self):
+        initrange = 0.1
+        self.encoder.weight.data.uniform_(-initrange, initrange)
+
 
     def _forward_alg(self, feats):
         # Do the forward algorithm to compute the partition function
@@ -275,7 +302,6 @@ class BiLSTM_CRF(nn.Module):
         return alpha
 
     def _get_lstm_features(self, sentence, pos_tagging,tf_idf):
-        self.hidden = self.init_hidden()
         embeds = self.word_embeds(sentence).view(len(sentence), -1)
         pos = torch.eye(self.posset_size).to(device)[pos_tagging]
         tf_idf = torch.tensor(np.array(tf_idf),dtype=torch.float).unsqueeze(1)
@@ -285,24 +311,16 @@ class BiLSTM_CRF(nn.Module):
 
         return lstm_out
 
-    def _cal_attention(self, lstm_out, method):
-        attention_result = torch.zeros(lstm_out.size()[0], self.hidden_dim * 2, device=device)
-        if method == 'ATTN_TYPE_DOT_PRODUCT':
-            # bmm: https://pytorch.org/docs/master/generated/torch.bmm.html
-            for i in range(lstm_out.size()[0]):
-                hidden = lstm_out[i]
-                attn_weights = F.softmax(torch.bmm(hidden.unsqueeze(0).unsqueeze(0), lstm_out.T.unsqueeze(0)), dim=-1)
-                attn_output = torch.bmm(attn_weights, lstm_out.unsqueeze(0))
-                concat_output = torch.cat((hidden.unsqueeze(0),attn_output[0]), 1)
-                attention_result[i] = concat_output.squeeze(0)
-        elif method == 'ATTN_TYPE_SCALE_DOT_PRODUCT':
-            for i in range(lstm_out.size()[0]):
-                hidden = lstm_out[i]
-                attn_weights = F.softmax(1/np.sqrt(self.hidden_dim)*torch.bmm(hidden.unsqueeze(0).unsqueeze(0), lstm_out.T.unsqueeze(0)), dim=-1)
-                attn_output = torch.bmm(attn_weights, lstm_out.unsqueeze(0))
-                concat_output = torch.cat((hidden.unsqueeze(0),attn_output[0]), 1)
-                attention_result[i] = concat_output.squeeze(0)
-        attention_out = self.hidden2tag(attention_result)
+    def _cal_attention(self, lstm_out):
+        self.hidden = self.init_hidden()
+        device = lstm_out.device
+        if self.src_mask is None or self.src_mask.size(0) != len(lstm_out):
+            mask = self._generate_square_subsequent_mask(len(lstm_out)).to(device)
+            self.src_mask = mask
+        src = lstm_out * math.sqrt(lstm_out.size()[-1])
+        src = self.pos_encoder(src)
+        self_atten_output = self.transformer_encoder(src.unsqueeze(1), self.src_mask).view(len(lstm_out),-1)
+        attention_out = self.hidden2tag(self_atten_output)
         return attention_out
 
     def _score_sentence(self, feats, tags):
@@ -362,7 +380,7 @@ class BiLSTM_CRF(nn.Module):
     def neg_log_likelihood(self, sentence, pos_tagging,tf_idf, tags):
         lstm_out = self._get_lstm_features(sentence, pos_tagging,tf_idf)
 
-        attention_feats = self._cal_attention(lstm_out, self.method)
+        attention_feats = self._cal_attention(lstm_out)
         forward_score = self._forward_alg(attention_feats)
         gold_score = self._score_sentence(attention_feats, tags)
         return forward_score - gold_score
@@ -371,12 +389,31 @@ class BiLSTM_CRF(nn.Module):
         # Get the emission scores from the BiLSTM
         lstm_out = self._get_lstm_features(sentence, pos_tagging,tf_idf)
 
-        attention_feats = self._cal_attention(lstm_out, self.method)
+        attention_feats = self._cal_attention(lstm_out)
 
         # Find the best path, given the features.
 
         score, tag_seq = self._viterbi_decode(attention_feats)
         return score, tag_seq,attention_feats
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term) #0::2 means starting with index 0, step = 2
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        x = x + self.pe[0, :]
+        return self.dropout(x)
+
 
 
 
@@ -401,13 +438,13 @@ def cal_acc(model, input_index,pos_index,tf_idf_index, output_index):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 HIDDEN_DIM = 128
-HIDDEN_LAYER= 2
+HIDDEN_LAYER=1
 method = 'ATTN_TYPE_DOT_PRODUCT'
+LR = 5
 
-
-model = BiLSTM_CRF(len(word_to_ix), tag_to_ix, pos_to_ix ,EMBEDDING_DIM, HIDDEN_DIM,HIDDEN_LAYER,method).to(device)
-optimizer = optim.SGD(model.parameters(), lr=0.01, weight_decay=1e-4)
-
+model = BiLSTM_CRF(len(word_to_ix), tag_to_ix, pos_to_ix, nhead, nlayers ,EMBEDDING_DIM, HIDDEN_DIM,dropout, HIDDEN_LAYER,method).to(device)
+optimizer = optim.SGD(model.parameters(), lr=LR, weight_decay=1e-4)
+scheduler = torch.optim.lr_scheduler.StepLR(optimizer, 1.0, gamma=0.95)
 """Each epoch will take about 1-2 minutes"""
 print("="*89)
 print("start training!")

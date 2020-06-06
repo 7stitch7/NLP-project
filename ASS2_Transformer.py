@@ -256,8 +256,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #
 # ntokens = len(TEXT.vocab.stoi) # the size of vocabulary
 ntokens = len(word_list)
-emsize = 500 # embedding dimension
-nhid = 500 # the dimension of the feedforward network model in nn.TransformerEncoder
+emsize = 200 # embedding dimension
+nhid = 250 # the dimension of the feedforward network model in nn.TransformerEncoder
 nlayers = 10 # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
 nhead = 10 # the number of heads in the multiheadattention models
 dropout = 0.05 # the dropout value

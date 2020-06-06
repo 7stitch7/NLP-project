@@ -221,7 +221,7 @@ class BiLSTM_CRF(nn.Module):
         """Here we use the embedding matrix as the initial weights of nn.Embedding"""
         self.word_embeds.weight.data.copy_(torch.from_numpy(embedding_matrix))
 
-        self.lstm = nn.LSTM(embedding_dim + len(pos_to_ix) + 1, hidden_dim // 2,
+        self.lstm = nn.LSTM((embedding_dim + len(pos_to_ix) + 1)*2, hidden_dim // 2,
                             num_layers=self.num_layers, bidirectional=True)
 
         # Maps the output of the LSTM into tag space.
@@ -274,37 +274,35 @@ class BiLSTM_CRF(nn.Module):
         alpha = log_sum_exp(terminal_var)
         return alpha
 
+
+    def _cal_attention(self, hiddens, method):
+        attention_result = torch.zeros(hiddens.size()[0], hiddens.size()[-1] * 2, device=device)
+        if method == 'ATTN_TYPE_DOT_PRODUCT':
+            # bmm: https://pytorch.org/docs/master/generated/torch.bmm.html
+            for i in range(hiddens.size()[0]):
+                hidden = hiddens[i]
+                attn_weights = F.softmax(torch.bmm(hidden.unsqueeze(0).unsqueeze(0), hiddens.T.unsqueeze(0)), dim=-1)
+                attn_output = torch.bmm(attn_weights, hiddens.unsqueeze(0))
+                concat_output = torch.cat((hidden.unsqueeze(0),attn_output[0]), 1)
+                attention_result[i] = concat_output.squeeze(0)
+        elif method == 'ATTN_TYPE_SCALE_DOT_PRODUCT':
+            for i in range(hiddens.size()[0]):
+                hidden = hiddens[i]
+                attn_weights = F.softmax(1/np.sqrt(self.hidden_dim)*torch.bmm(hidden.unsqueeze(0).unsqueeze(0), hiddens.T.unsqueeze(0)), dim=-1)
+                attn_output = torch.bmm(attn_weights, hiddens.unsqueeze(0))
+                concat_output = torch.cat((hidden.unsqueeze(0),attn_output[0]), 1)
+                attention_result[i] = concat_output.squeeze(0)
+        return attention_result
     def _get_lstm_features(self, sentence, pos_tagging,tf_idf):
         self.hidden = self.init_hidden()
         embeds = self.word_embeds(sentence).view(len(sentence), -1)
         pos = torch.eye(self.posset_size).to(device)[pos_tagging]
         tf_idf = torch.tensor(np.array(tf_idf),dtype=torch.float).unsqueeze(1)
         combined = torch.cat((embeds, pos,tf_idf), 1).view(len(sentence), 1, -1)
-        lstm_out, self.hidden = self.lstm(combined, self.hidden)
+        att_out = self._cal_attention(combined.squeeze(1), self.method)
+        lstm_out, self.hidden = self.lstm(att_out.unsqueeze(1), self.hidden)
         lstm_out = lstm_out.view(len(sentence), self.hidden_dim)
-
         return lstm_out
-
-    def _cal_attention(self, lstm_out, method):
-        attention_result = torch.zeros(lstm_out.size()[0], self.hidden_dim * 2, device=device)
-        if method == 'ATTN_TYPE_DOT_PRODUCT':
-            # bmm: https://pytorch.org/docs/master/generated/torch.bmm.html
-            for i in range(lstm_out.size()[0]):
-                hidden = lstm_out[i]
-                attn_weights = F.softmax(torch.bmm(hidden.unsqueeze(0).unsqueeze(0), lstm_out.T.unsqueeze(0)), dim=-1)
-                attn_output = torch.bmm(attn_weights, lstm_out.unsqueeze(0))
-                concat_output = torch.cat((hidden.unsqueeze(0),attn_output[0]), 1)
-                attention_result[i] = concat_output.squeeze(0)
-        elif method == 'ATTN_TYPE_SCALE_DOT_PRODUCT':
-            for i in range(lstm_out.size()[0]):
-                hidden = lstm_out[i]
-                attn_weights = F.softmax(1/np.sqrt(self.hidden_dim)*torch.bmm(hidden.unsqueeze(0).unsqueeze(0), lstm_out.T.unsqueeze(0)), dim=-1)
-                attn_output = torch.bmm(attn_weights, lstm_out.unsqueeze(0))
-                concat_output = torch.cat((hidden.unsqueeze(0),attn_output[0]), 1)
-                attention_result[i] = concat_output.squeeze(0)
-        attention_out = self.hidden2tag(attention_result)
-        return attention_out
-
     def _score_sentence(self, feats, tags):
         # Gives the score of a provided tag sequence
         score = torch.zeros(1).to(device)
@@ -372,6 +370,7 @@ class BiLSTM_CRF(nn.Module):
         lstm_out = self._get_lstm_features(sentence, pos_tagging,tf_idf)
 
         attention_feats = self._cal_attention(lstm_out, self.method)
+        attention_feats = self.hidden2tag(attention_feats)
 
         # Find the best path, given the features.
 
@@ -401,7 +400,7 @@ def cal_acc(model, input_index,pos_index,tf_idf_index, output_index):
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 HIDDEN_DIM = 128
-HIDDEN_LAYER= 2
+HIDDEN_LAYER=1
 method = 'ATTN_TYPE_DOT_PRODUCT'
 
 
