@@ -307,7 +307,6 @@ class BiLSTM_CRF(nn.Module):
         return lstm_out
 
 
-
     def _score_sentence(self, feats, tags):
         # Gives the score of a provided tag sequence
         score = torch.zeros(1).to(device)
